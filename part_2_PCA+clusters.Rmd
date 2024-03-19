@@ -1,0 +1,283 @@
+---
+title: "scRNA ngly1 - PCA and finding clusters "
+author: "Callahan McGovern"
+output:
+    html_document:
+      keep_md: TRUE
+---
+
+# Part 2: PCA and choice in number of PCS
+## If you wanted to ingrate the data, you would do that before this step.
+
+```{r load_libraries, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(Seurat)
+library(biomaRt)
+library(knitr)
+library(ggplot2)
+```
+
+## Load the Seurat object
+```{r load_rdata, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#same number of features but less # of samples (aka cells) than before filtering steps.
+load(file="pre_sample_corrected.RData")
+experiment.aggregate
+system("say Done")
+```
+
+## Scale the data
+
+ScaleData - Scales and centers genes in the dataset. If variables are provided in vars.to.regress, they are individually regressed against each gene, and the resulting residuals are then scaled and centered unless otherwise specified. Here we regress out cell cycle results S.Score and G2M.Score, percentage mitochondria (percent.mito) and the number of features (nFeature_RNA).
+# scales out features we are not interested in -- ie. subtracting out effect of these variables. 
+## This is a normalization of each gene across cells because some genes are just more inherently variable.
+### This scaled data is not used for differential expression so make sure to change the variable name
+
+```{r scale_data, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+experiment.aggregate <- ScaleData(
+  object = experiment.aggregate)
+ #vars.to.regress = c("nFeature_RNA")) #you can change these variables if we want to look at effects of cell cycle stages (S or G2M), or % mito, or read depth (nFeature). Or add in "S.Score", "G2M.Score", "percent.mito", if you want to regress cell cycle effects out - scaleData with the vars.to.regress argument is taking a  long time -- skipped for now. 
+
+
+system("say Scaled")
+```
+
+## Dimensionality reduction with PCA
+
+Next we perform PCA (principal components analysis) on the scaled data. PCA tries to capture the data in a few principal components, which convey the most variation in the dataset.
+
+```{r pca, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+experiment.aggregate <- RunPCA(object = experiment.aggregate, npcs=100)
+```
+
+Then we want to visualize PCA loadings
+```{r viz_pca, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+VizDimLoadings(experiment.aggregate, dims = 1, ncol = 1) + theme_minimal(base_size = 8)
+VizDimLoadings(experiment.aggregate, dims = 2, ncol = 1) + theme_minimal(base_size = 8)
+```
+
+Principal components plot
+```{r plot_pca, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+DimPlot(object = experiment.aggregate, reduction = "pca")
+
+#First PC is on the X axis.... you can see these genes are highly correlated with the position along first PC.
+```
+
+Draws a heatmap focusing on a principal component. Both cells and genes are sorted by their principal component scores. Allows for nice visualization of sources of heterogeneity in the dataset.
+
+```{r heatmap_pca, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+DimHeatmap(object = experiment.aggregate, dims = 1:6, cells = 500, balanced = TRUE)
+
+DimHeatmap(object = experiment.aggregate, dims = 7:12, cells = 500, balanced = TRUE)
+
+# columns are cells and rows are genes
+## Genes that influence the PC tend to divide the cells into 2 groups. 
+### You are looking at the top 15 genes from the dimensional loadings plot (from VizDimLoadings()) visualized as a heatmap. 
+```
+
+
+### Selecting which PCs to use
+To overcome the extensive technical noise in any single gene, Seurat clusters cells based on their PCA scores, with each PC essentially representing a meta-gene that combines information across a correlated gene set. Determining how many PCs to include downstream is therefore an important step.
+
+ElbowPlot plots the standard deviations (or approximate singular values if running PCAFast) of the principle components for easy identification of an elbow in the graph. This elbow often corresponds well with the significant PCs and is much faster to run.  This is the traditional approach to selecting principal components.
+
+```{r elbow, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+ElbowPlot(experiment.aggregate, ndims = 100)
+
+#Shows the variation shown by each PC. The top PCs show greater St.Dev. (varation). First 12 dots on the left are visualized in the heat maps above (12 PCs, 1 per heatmap). 
+## Plot elbow plot to help you figure out how many PCs to run on above and below sections. 
+### somewhere at the inflection (elbow) is a good place to cut off your PCs. Here the first 25-ish look significant. 
+#### We will actually select which PCs to use going forward on the next part of the work flow -- this is just an exploration to decide which PCs are important. 
+```
+
+## Saving a loading data
+Original data set in Seurat class, with no filtering
+```{r save file, include=FALSE}
+# this will save your object into the R workspace so you can use it later 
+save(experiment.aggregate,file="seurate_object_postPCA")
+```
+
+
+##  Load post PCA seurat object
+```{r load data, include=FALSE}
+load(file="seurate_object_postPCA.RData")
+experiment.aggregate
+
+system("say DONE!")
+```
+
+## So how many features should we use? Use too few and your leaving out interesting variation that may define cell types, use too many and you add in noise? maybe?
+
+Choice should be made based on the prior part. 
+```{r use_pcs, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+use.pcs = 1:50 # remember this is decided from the elbow plot above. (UCD peeps said they usually use 1:50 unless data really says otherwise) 
+```
+
+```{r done}
+system("say done")
+```
+
+## This is where doublet finder would go! Then we would repeat filtering, norm, and PCA. 
+
+## Identifying clusters
+
+Seurat implements an graph-based clustering approach. Distances between the cells are calculated based on previously identified PCs. 
+
+The default method for identifying k-nearest neighbors has been changed in V4 to annoy ("Approximate Nearest Neighbors Oh Yeah!). This is an approximate nearest-neighbor approach that is widely used for high-dimensional analysis in many fields, including single-cell analysis. Extensive community benchmarking has shown that annoy substantially improves the speed and memory requirements of neighbor discovery, with negligible impact to downstream results. 
+ 
+The FindClusters function implements the neighbor based clustering procedure, and contains a resolution parameter that sets the granularity of the downstream clustering, with increased values leading to a greater number of clusters. I tend to like to perform a series of resolutions, investigate and choose.
+
+```{r find_neighbors, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+experiment.aggregate <- FindNeighbors(experiment.aggregate2, reduction="pca", dims = use.pcs) #use.pcs from above selection
+
+experiment.aggregate <- FindClusters(
+    object = experiment.aggregate,
+    resolution = seq(0.25,1,0.5), #We give it a vector of resolutions to try. Play with the resolution values and decide. Higher values = more clusters. 
+    verbose = TRUE
+)
+system("say found clusters")
+```
+
+Seurat add the clustering information to the metadata beginning with RNA_snn_res. followed by the resolution
+
+```{r cluster_metadata, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+head(experiment.aggregate[[]])
+```
+
+
+Lets first investigate how many clusters each resolution produces and set it to the smallest resolutions of 0.25 (fewest clusters).
+
+```{r clusters_per_res, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+sapply(grep("res",colnames(experiment.aggregate@meta.data),value = TRUE),
+       function(x) length(unique(experiment.aggregate@meta.data[,x])))
+
+system("say done")
+```
+
+### Choosing a resolution
+
+Lets set the default identity to a resolution of 0.25 and produce a table of cluster to sample assignments.
+```{r cells_per_res_sample, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+Idents(experiment.aggregate) <- "RNA_snn_res.0.25" #Idents here represent clusters based on that level of resolution -- here you should look for clusters (rows) that are common in some samples and uncommon in others. 
+# NGLY1 data - cluster 0 is uncommon in 276 samples but not others and clusters 5/6 are common in 276 samples but not in others 
+
+colnames(experiment.aggregate@meta.data) # How to look at components of the suerat object. We have added a lot to it at this point. 
+
+table(Idents(experiment.aggregate),experiment.aggregate2$orig.ident)
+```
+### uMAP dimensionality reduction plot.
+
+```{r umap, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+experiment.aggregate <- RunUMAP(
+  object = experiment.aggregate,
+  dims = use.pcs)
+
+system("say complete")
+```
+
+Plot uMap coloring by the slot 'ident' (default).
+```{r plot_umap, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+# This will change based on the resolution seleted above. Discuss with mooney. Tried 0.25 and 0.5. 
+DimPlot(object = experiment.aggregate, pt.size=0.25, reduction = "umap", label = T)
+```
+
+### Can use feature plot to plot our read valued metadata, like nUMI, Feature count, and percent Mito
+
+FeaturePlot can be used to color cells with a 'feature', non categorical data, like number of UMIs
+```{r plot_rna, warning=FALSE,error=FALSE,message=FALSE}
+FeaturePlot(experiment.aggregate, features = c('nCount_RNA'), pt.size=0.5)
+```
+and number of genes present
+```{r plot_feature, warning=FALSE,error=FALSE,message=FALSE}
+FeaturePlot(experiment.aggregate, features = c('nFeature_RNA'), pt.size=0.5)
+```
+Use when you want to look into particular features
+```{r feature_plots}
+# If you want to look at a particular gene in question. You have to do the umap first to then split by a feature. ... what gene(s) should we do this by? 
+
+#FeaturePlot(experiment.aggregate, features = c("gene.name))
+
+# For multiple genes: 
+#FeaturePlot(experiment.aggregate, features = c("gene 1", "gene 2"), split.by = "orig.ident")
+
+# can then make a violin plot 
+#VlnPlot(experimental.aggregate, features = C() , group.by =  )
+
+# limit plot to cells in the clusters you care about (here its cluster 7,14)
+#FeaturePlot(experiment.aggregate, 
+#              features = c("gene1", "gene2"), 
+#              cells = Cells(experiment.aggregate2[Idents(experiment.aggregate2)
+#              %in% c("5", "6")], 
+#              split.by = "ident"))
+  
+#VlnPlot(experiment.aggregate, 
+#        features = "APC"), 
+#        idents = c("7", "14"), 
+#        split.by = "orig.ident")
+        
+                    
+```
+
+```{r save file, include=FALSE}
+# this will save your object into the R workspace so you can use it later 
+save(experiment.aggregate,file="seurate_object_postPCA")
+```
+
+
+##  Load post PCA seurat object
+```{r load data, include=FALSE}
+load(file="seurate_object_postPCA.RData")
+experiment.aggregate
+```
+
+
+```{r genotyping}
+# use apply() functions for factors (go by row to find pattern)
+library(dplyr, quietly = TRUE)
+library(tibble)
+library(Seurat)
+
+genofun <- function(x)
+{
+  Genotype <- c("1-2"="Heterozygote", "3a"="Heterozygote", "4b"="Heterozygote","3-1"="Homozygote","4-2"="Homozygote","276-6-2"="Homozygote","276-6-7"="Homozygote","1b"="Wild Type","2a"="Wild Type","1a-m"="Wild Type","2b-t"="Wild Type")
+  return(as.character(Genotype[x]))
+ 
+}
+experiment.aggregate$genotype <- sapply(experiment.aggregate$orig.ident,genofun)
+str(experiment.aggregate$genotype)
+head(experiment.aggregate)
+tail(experiment.aggregate)
+```
+
+```{r cluster by genotype}
+UMAP_by_geno <- RunUMAP(experiment.aggregate, dims = 1:50) #try with 1:50
+DimPlot(UMAP_by_geno, group.by = 'genotype', pt.size = 0.25)
+DimPlot(object = experiment.aggregate, pt.size=0.25, reduction = "umap", label = T) # this is original clustering to compare with genotype clustering
+
+```
+
+```{r save file, include=FALSE}
+# this will save your object into the R workspace so you can use it later 
+save(experiment.aggregate,file="seurate_object_postPCA")
+```
+
+
+## Building a tree relating the 'average' cell from each group in default 'Ident' (currently "RNA_snn_res.1.25"). Tree is estimated based on a distance matrix constructed in either gene expression space or PCA space.
+```{r load_libs}
+#install.packages("ape")
+library("ape")
+```
+
+```{r create_tree, warning=FALSE,error=FALSE,message=FALSE}
+
+Idents(experiment.aggregate) <- "RNA_snn_res.0.25"
+experiment.aggregate <- BuildClusterTree(
+  experiment.aggregate, dims = use.pcs)
+
+PlotClusterTree(experiment.aggregate)
+```
+
+
+```{r umap_plot2, warning=FALSE,error=FALSE,message=FALSE}
+DimPlot(object = experiment.aggregate, pt.size=0.25, label = TRUE, reduction = "umap")
+```
+
+

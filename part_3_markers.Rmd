@@ -1,0 +1,234 @@
+---
+title: "scRNA NGLY1 - Finding marker Genes "
+author: "Callahan"
+output:
+    html_document:
+      keep_md: TRUE
+---
+
+Last Updated: July 15, 2022
+
+# Part 5: Finding Marker Genes
+
+## Load libraries
+```{r load_libraries, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+```
+
+## Load the Seurat object
+```{r load_rdata, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+load(file="seurate_object_postPCA")
+experiment.aggregate
+DimPlot(object = experiment.aggregate, pt.size=0.25, reduction = "umap", label = T)
+
+```
+
+## Identifying Marker Genes
+
+Seurat can help you find markers that define clusters via differential expression.
+
+`FindMarkers` identifies markers for a cluster relative to all other clusters.
+
+`FindAllMarkers` does so for all clusters
+
+`FindAllMarkersNode` defines all markers that split a Node from the cluster tree
+
+This lets you look at differently expressed markers in clusters (not advances diff exp, but lets you explore while clustering)
+
+FindAllMarkers can be used to automate the process across all genes.
+
+```{r find_all_markers, warning=FALSE,error=FALSE,message=FALSE}
+markers_all <- FindAllMarkers(
+    object = experiment.aggregate,
+    only.pos = TRUE,
+    min.pct = 0.25,
+    thresh.use = 0.25
+)
+dim(markers_all)
+head(markers_all)
+table(table(markers_all$gene))
+
+markers_all_single <- markers_all[markers_all$gene %in% names(table(markers_all$gene))[table(markers_all$gene) == 1],]
+
+dim(markers_all_single)
+table(table(markers_all_single$gene))
+
+table(markers_all_single$cluster)
+
+head(markers_all_single)
+tail(markers_all_single)
+
+nrow(markers_all_single)
+```
+
+__________________________Following Analysis of Mouse Cell Atlas scRNA-seq using Seurat Tutorial online ___________________________
+
+``` {r markers}
+markers_all <- markers_all[ markers_all$p_val_adj < 0.01, ]
+write.table(markers_all, file="markers.txt")
+
+head(markers_all)
+
+top.markers <- do.call(rbind, lapply(split(markers_all, markers_all$cluster), head))
+DoHeatmap(experiment.aggregate, features = top.markers$gene, label = F)
+```
+
+``` {r markers and clusters}
+#cluster 0
+markers.0 <- markers_all[ which(markers_all$cluster == 0), ]
+VlnPlot(experiment.aggregate, features = head(markers.0$gene))
+FeaturePlot(experiment.aggregate, features = head(markers.0$gene), cols = c("grey", "blue"), reduction = "umap")
+
+#cluster 5
+markers.5 <- markers_all[ which(markers_all$cluster == 5), ]
+VlnPlot(experiment.aggregate, features = head(markers.5$gene))
+FeaturePlot(experiment.aggregate, features = head(markers.5$gene), cols = c("grey", "blue"), reduction = "umap")
+
+#clusters 0 and 5
+markers.0.5 <- FindMarkers(experiment.aggregate, ident.1 = 0, ident.2 = 5, min.pct=0.25)
+markers.0.5 <- markers.0.5[ markers.0.5$p_val_adj < 0.01, ]
+markers.0.5
+```
+
+``` {r annotate clusters}
+annotation <- read.table("./reference/MCA_CellAssignments.csv", header=TRUE, sep=",")
+experiment.aggregate@meta.data$Cell.name <- paste0("xx", rownames(experiment.aggregate@meta.data))
+experiment.aggregate@meta.data$Annotation <- annotation$Annotation[ match(experiment.aggregate@meta.data$Cell.name, annotation$Cell.name) ]
+experiment.aggregate@meta.data$Annotation <- gsub("\\x\\)", "", experiment.aggregate@meta.data$Annotation)
+TSNEPlot(experiment.aggregate, group.by="Annotation", do.label=TRUE, do.return=TRUE) + theme(legend.position = "none")
+
+```
+
+
+
+
+___________________________________________________________________________________________________________________________________
+
+Plot a heatmap of genes by cluster for the top 10 marker genes per cluster
+```{r markers_head, warning=FALSE,error=FALSE,message=FALSE, fig.height=7}
+top10 <- markers_all_single %>% group_by(cluster) %>% top_n(10, avg_log2FC) #grabs top10 markers for each cluster -- you can see where things are being over or under expressed in a crude way 
+DoHeatmap(
+    object = experiment.aggregate,
+    features = top10$gene
+)
+```
+Try following this https://satijalab.org/seurat/articles/pbmc3k_tutorial.html 
+
+```{r find_markers, warning=FALSE,error=FALSE,message=FALSE}
+# need to look at clusters and pick which ones we are intersted in
+markers_5_0 = FindMarkers(experiment.aggregate, ident.1=c(0), ident.2 = c(5), min.pct = 0.5)  # making two groups of clusters we are interested in comparing - I chose 0 and 5 because of the way genotypes clustered 
+markers_3_0 = FindMarkers(experiment.aggregate, ident.1=c(0), ident.2 = c(3), min.pct = 0.5)
+
+nrow(markers_5_0)
+nrow(markers_3_0)
+head(markers_5_0, n = 10)
+head(markers_3_0, n = 10)
+
+# find markers in 0 and 5 but not in the others !!! How ?! 
+
+head(markers)
+dim(markers)
+table(markers$avg_log2FC > 0)
+table(markers$p_val_adj < 0.05 & markers$avg_log2FC > 0)
+```
+
+
+pct.1 and pct.2 are the proportion of cells with expression above 0 in ident.1 and ident.2 respectively. p_val is the raw p_value associated with the differntial expression test with adjusted value in p_val_adj. avg_logFC is the average log fold change difference between the two groups.
+
+
+Can use a violin plot to visualize the expression pattern of some markers
+```{r vln, warning=FALSE,error=FALSE,message=FALSE}
+VlnPlot(object = experiment.aggregate, features = rownames(markers_5_0)[1:5], pt.size = 0.05)
+```
+
+Or a feature plot
+```{r gene_feature, warning=FALSE,error=FALSE,message=FALSE}
+FeaturePlot(
+    experiment.aggregate,
+    features = c("Rpl7", "Pgap1"),
+    cols = c("lightgrey", "blue"),
+    ncol = 2
+)
+```
+
+
+```{r get_means, warning=FALSE,error=FALSE,message=FALSE}
+# Get expression of genes for cells in and out of each cluster
+getGeneClusterMeans <- function(gene, cluster){
+  x <- GetAssayData(experiment.aggregate)[gene,]
+  m <- tapply(x, ifelse(Idents(experiment.aggregate) == cluster, 0, 18), mean)
+  mean.in.cluster <- m[2]
+  mean.out.of.cluster <- m[1]
+  return(list(mean.in.cluster = mean.in.cluster, mean.out.of.cluster = mean.out.of.cluster))
+}
+
+## for sake of time only using first six (head)
+means <- mapply(getGeneClusterMeans, head(markers_all[,"gene"], n=20), head(markers_all[,"cluster"], n = 20))
+means <- matrix(unlist(means), ncol = 2, byrow = T)
+
+colnames(means) <- c("mean.in.cluster", "mean.out.of.cluster")
+rownames(means) <- head(markers_all[,"gene"], n=20)
+markers_all2 <- cbind(head(markers_all, n=20), means)
+head(markers_all2)
+tail(markers_all2)
+```
+
+## Finishing up clusters.
+
+At this point in time you should use the tree, markers, domain knowledge, and goals to finalize your clusters. This may mean adjusting PCA to use, mergers clusters together, choosing a new resolutions, etc. When finished you can further name it cluster by something more informative. Ex.
+```{r finish_cluster, warning=FALSE,error=FALSE,message=FALSE}
+experiment.clusters <- experiment.aggregate
+experiment.clusters <- RenameIdents(
+  object = experiment.clusters,
+  '0' = 'cell_type_A',
+  '1' = 'cell_type_B',
+  '2' = 'cell_type_C'
+)
+# and so on
+
+DimPlot(object = experiment.clusters, pt.size=0.5, label = T, reduction = "umap")
+```
+
+Right now our results ONLY exist in the Ident data object, lets save it to our metadata table so we don't accidentally loose it.
+```{r save_cluster, warning=FALSE,error=FALSE,message=FALSE}
+experiment.merged$finalcluster <- Idents(experiment.merged)
+head(experiment.merged[[]])
+table(experiment.merged$finalcluster, experiment.merged$orig.ident)
+```
+
+## Subsetting samples and plotting
+
+If you want to look at the representation of just one sample, or sets of samples
+```{r subset, warning=FALSE,error=FALSE,message=FALSE}
+experiment.sample1 <- subset(experiment.merged, orig.ident == "A001-C-007")
+
+DimPlot(object = experiment.sample1, group.by = "RNA_snn_res.0.25", pt.size=0.5, label = TRUE, reduction = "tsne")
+```
+
+### Adding in a new metadata column representing samples within clusters. So differential expression of A001-C-007 vs B001-A-301 within cluster 0
+
+```{r, warning=FALSE,error=FALSE,message=FALSE, fig.height=7}
+experiment.merged$samplecluster = paste(experiment.merged$orig.ident,experiment.merged$finalcluster,sep = '_')
+
+# set the identity to the new variable
+Idents(experiment.merged) <- "samplecluster"
+
+markers.comp <- FindMarkers(experiment.merged, ident.1 = c("A001-C-007_12", "A001-C-104_12"), ident.2= "B001-A-301_12")
+
+head(markers.comp)
+
+experiment.subset <- subset(experiment.merged, samplecluster %in%  c( "A001-C-007_12", "A001-C-104_12", "B001-A-301_12" ))
+DoHeatmap(object = experiment.subset, features = head(rownames(markers.comp),20))
+```
+
+
+```{r change_back_to_final, warning=FALSE,error=FALSE,message=FALSE}
+Idents(experiment.merged) <- "finalcluster"
+```
+
+And last lets save all the Seurat objects in our session.
+```{r save_rdata, eval=TRUE}
+save(list=grep('experiment', ls(), value = TRUE), file="clusters_seurat_object.RData")
+```

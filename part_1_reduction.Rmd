@@ -1,0 +1,504 @@
+---
+title: "scRNA NGLY1 - loading data, filtering, and normalizing"
+output: html_document
+date: "2022-08-04"
+---
+
+# Part 1: Loading data from CellRanger into R
+
+## Single Cell Analysis with Seurat. I am currently using the filtered data from cellranger. Should I switch to using the raw data? 
+
+```{r setup env, eval=FALSE, echo=FALSE}
+knitr::opts_chunk$set(eval = FALSE, include = FALSE)
+if (!requireNamespace("BiocManager", quietly = TRUE)){
+    install.packages("BiocManager")
+}
+
+if (!any(rownames(installed.packages()) == "rmarkdown")){
+  BiocManager::install("rmarkdown")
+}
+
+if (!any(rownames(installed.packages()) == "tinytex")){
+  BiocManager::install("tinytex")
+}
+
+if (!any(rownames(installed.packages()) == "Seurat")){
+  BiocManager::install("Seurat")
+}
+
+if (!any(rownames(installed.packages()) == "hdf5r")){
+  BiocManager::install("hdf5r")
+}
+
+if (!any(rownames(installed.packages()) == "knitr")){
+  BiocManager::install("knitr")
+}
+
+if (!any(rownames(installed.packages()) == "kableExtra")){
+  BiocManager::install("kableExtra")
+}
+
+if (!any(rownames(installed.packages()) == "ggplot2")){
+  BiocManager::install("ggplot2")
+}
+
+if (!any(rownames(installed.packages()) == "dplyr")){
+  BiocManager::install("dplyr")
+}
+
+if (!any(rownames(installed.packages()) == "reshape2")){
+  BiocManager::install("reshape2")
+}
+
+if (!any(rownames(installed.packages()) == "biomaRt")){
+  BiocManager::install("biomaRt")
+}
+
+if (!any(rownames(installed.packages()) == "org.Hs.eg.db")){
+  BiocManager::install("org.Hs.eg.db")
+}
+
+if (!any(rownames(installed.packages()) == "limma")){
+  BiocManager::install("limma")
+}
+
+if (!any(rownames(installed.packages()) == "topGO")){
+  BiocManager::install("topGO")
+}
+
+if (!any(rownames(installed.packages()) == "sva")){
+  BiocManager::install("sva")
+}
+
+if (!any(rownames(installed.packages()) == "scran")){
+  BiocManager::install("scran")
+}
+
+## All of these should now load without error.
+
+library(rmarkdown)
+library(tinytex)
+library(Seurat)
+library(hdf5r)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(biomaRt)
+library(limma)
+library(topGO)
+library(org.Hs.eg.db)
+library(sva) #didnt work 
+library(scran) #didnt work 
+
+sessionInfo()
+```
+
+```{r load libraries, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# must have Seurat
+library(Seurat)
+library(kableExtra)
+library(ggplot2)
+```
+
+### Setup the experiment folder and data info
+```{r exp_setup, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+experiment_name = "NGLY1"
+dataset_loc <- "./"
+ids <- c("1-2" , "1a-m", "1b", "2a", "2b-t", "3-1", "3a", "4-2", "4b", "276-6-2","276-6-7") #make sure an outs folder exists within each sample folder
+
+#to subset data by sample that it came from use....
+##subset(x = experiment.aggregate, idents = "sample name")
+
+```
+
+## Load the Cell Ranger Matrix Data and create the base Seurat object.
+Cell Ranger provides a function `cellranger aggr` that will combine multiple samples into a single matrix file. However, when processing data in R this is unnecessary and we can quickly aggregate them in R.
+
+Seurat provides a function `Read10X` and `Read10X_h5` to read in 10X data folder. First we read in data from each individual sample folder. 
+
+Later, we initialize the Seurat object (`CreateSeuratObject`) with the non-normalized data (can be the raw or filtered matrix from cellranger). Keep all cells with at least 200 detected genes. Also extracting sample names, calculating and adding in the metadata mitochondrial percentage of each cell. Adding in the metadata batchid and cell cycle. Finally, saving the raw Seurat object.
+
+## Load the Cell Ranger Matrix Data (hdf5 file) and create the base Seurat object.
+```{r load_data_hdf5, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#lapply is applying a set of functions to every element of a list (ie. every sample)
+d10x.data <- lapply(ids, function(i){   #i defines an element of the list
+  d10x <- Read10X_h5(file.path(dataset_loc, i, "/outs","filtered_feature_bc_matrix.h5")) 
+  #read10x_h5() - reads in a sparse matrix in h5 format for each sample
+  colnames(d10x) <- paste(sapply(strsplit(colnames(d10x),split="-"),'[[',1L),i,sep="_")
+  #colnames() - renames colnames. replaces numeral in barcode with the sample identifier. 
+  d10x
+})
+
+# d10x is an object with 3 matrices each with gene names, cell #'s, and read counts. 
+# Columns represent cells here. 
+# rownames are genes
+
+names(d10x.data) <- ids
+str(d10x.data)
+
+# WHAT DO YOU SEE IN THIS OUTPUT:
+# i/j/p are indicators for where the matrix is not empty. (sparse matrices are huge but mainly empty so they leave out the zero character to save memory and time)
+# Dim shows # of genes and # of cells 
+# Dimnames gives previews of the columns and row names 
+
+```
+
+If you don't have the needed hdf5 libraries you can read in the matrix files like such #ignored because no problem with code chunk above 
+```{r load_data_matrix, eval=FALSE, include=FALSE}
+d10x.data <- sapply(ids, function(i){
+  d10x <- Read10X(file.path(dataset_loc, i, "/outs","raw_feature_bc_matrix"))
+  colnames(d10x) <- paste(sapply(strsplit(colnames(d10x), split="-"), '[[', 1L), i, sep="_")
+  d10x
+})
+names(d10x.data) <- ids
+```
+
+Here we recreate the barcode rank plot from the Cell Ranger web summary file.
+```{r fig_barcode_umi, eval=FALSE, fig.width=10, include=FALSE}
+plot_cellranger_cells <- function(ind){
+  xbreaks = c(1,1e1,1e2,1e3,1e4,1e5,1e6)
+  xlabels = c("1","10","100","1000","10k","100K","1M")
+  ybreaks = c(1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,20000,50000,100000,200000,500000,1000000)
+  ylabels = c("1","2","5","10","2","5","100","2","5","1000","2","5","10k","2","5","100K","2","5","1M")
+
+  pl1 <- data.frame(index=seq.int(1,ncol(d10x.data[[ind]])),
+                    nCount_RNA = sort(Matrix:::colSums(d10x.data[[ind]])+1,decreasing=T), #nCount RNA = UMI
+                    nFeature_RNA = sort(Matrix:::colSums(d10x.data[[ind]]>0)+1,decreasing=T)) %>% #nFeature = gene count
+    ggplot() + 
+    scale_color_manual(values=c("red2","blue4"), labels=c("Features", "UMI"), name=NULL) +
+    ggtitle(paste("CellRanger filltered cells:",ids[ind],sep=" ")) + xlab("Barcodes") + ylab("counts (UMI or Features") + 
+    scale_x_continuous(trans = 'log2', breaks=xbreaks, labels = xlabels) + 
+    scale_y_continuous(trans = 'log2', breaks=ybreaks, labels = ylabels) +
+    geom_line(aes(x=index, y=nCount_RNA, color = "UMI"), size=1.75) +
+    geom_line(aes(x=index, y=nFeature_RNA, color = "Features"), size=1.25) #features = gene
+
+  return(pl1)
+}
+
+#look through plots 
+plots <- lapply(ids, function(i){
+    plot_cellranger_cells(i)
+})
+
+# as RNA content in cells increases, there can be a few high abundance transcripts that account for that. So increase in RNA is not necessarily saying an increase in the # of genes expressed. 
+# you want to see a sharp drop (or "elbow") somewhere in the curve which shows there is a clear distinction between empty GEMs and GEMs with cells containing transcripts. 
+# gentle downward slope means there may be a spectrum of cell phenotypes (not bimodal but smooth transition from one cell phenotype to another)
+
+```
+
+### Create the Seurat object
+
+Filter criteria: removing genes that do not occur in a minimum of 10 cells and remove cells that don't have a minimum of 200 features
+The CreateSeuratObject command takes a lot of memory so if you get an error that "vector memory exhausted" then follow advice from https://stackoverflow.com/questions/51295402/r-on-macos-error-vector-memory-exhausted-limit-reached
+
+```{r create_seurat_object, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+experiment.data <- do.call("cbind", d10x.data) # do.call("cbind") takes list and sticks them into 1 object so... Here we stick the samples together by column! 
+
+experiment.aggregate <- CreateSeuratObject(
+  experiment.data,
+  project = experiment_name,
+  min.cells = 10, #filter genes based on how many cells express the genes. Gene must be expressed by at least 10 cells. 
+  min.features = 300, #what is the min feature # associated with a cell before i cut it out of the dataset. 
+  names.field = 2, #
+  names.delim = "\\_") # divides sample name at _ and name the sample based on 2nd field of the barcode 
+
+# check out colnames with head(colnames(experiment.aggregate))
+
+experiment.aggregate
+str(experiment.aggregate)
+```
+
+### The percentage of reads that map to the mitochondrial genome
+
+* Low-quality / dying cells often exhibit extensive mitochondrial contamination.
+* We calculate mitochondrial QC metrics with the PercentageFeatureSet function, which calculates the percentage of counts originating from a set of features.
+* We use the set of all genes, in mouse these genes can be identified as those that begin with 'mt', in human data they begin with MT.
+
+```{r explore, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#calculates % of UMIs from genes located on the mitochondrial chromosome
+# skip this step if we want to include genes with high mito transcriptional levels 
+experiment.aggregate$percent.mito <- PercentageFeatureSet(experiment.aggregate, pattern = "^MT-")
+summary(experiment.aggregate$percent.mito)
+experiment.aggregate
+```
+
+### Getting to know the Seurat object.
+
+The Seurat object is the center of each single cell analysis. It stores __all__ information associated with the dataset, including data, annotations, analyses, etc. The R function slotNames can be used to view the slot names within an object.
+Meta.data comes with columns loaded automatically but you can also add columns. 
+nCount = UMIs and nFeatures = genes. -- the higher the nCount, the bigger the difference between nCount and nFeature tend to be
+We added percent.mito column in the code chunk above. 
+
+
+```{r load singlets in}
+load(file="singlets_seurat_object.RData")
+
+experiment.aggregate
+singlets
+```
+
+
+
+
+
+```{r explore2, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+slotNames(experiment.aggregate)
+# seurat objects have built in functions for accessing them. You can look at slots within the object using object@slot. 
+experiment.aggregate@meta.data
+head(experiment.aggregate@meta.data)
+tail(experiment.aggregate@meta.data)
+# retrieve sprase matrix data with GetAssayData()
+GetAssayData(experiment.aggregate)
+
+#SINGLETS VERSION
+slotNames(singlets)
+singlets@meta.data
+head(singlets@meta.data)
+tail(singlets@meta.data)
+GetAssayData(singlets)
+```
+
+## Finally, save the original object.
+
+Original data set in Seurat class, with no filtering
+```{r save, eval=FALSE, include=FALSE}
+# this will save your object into the R workspace so you can use it later 
+save(experiment.aggregate,file="original_seurat_object.RData")
+```
+
+# Part 2: Some QA/QC, filtering and normalization
+
+Look at methods in this paper (https://www.nature.com/articles/s41593-019-0491-3#Sec12) -- for different filtering and normalization parameters, what should we use? 
+
+## Load libraries
+```{r libraries, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(Seurat, quietly = T)
+library(biomaRt, quietly = T)
+library(ggplot2, quietly = T)
+library(knitr, quietly = T)
+library(kableExtra, quietly = T)
+```
+
+## If working on this during a new session, load the Seurat object from part 1
+```{r load, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+load(file="singlets_seurat_object.RData")
+experiment.aggregate <- singlets.aggregate
+experiment.aggregate
+```
+
+Show 5% quantiles for number of genes per cell per sample
+```{r quantiles_1, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+kable(do.call("cbind", tapply(experiment.aggregate$nFeature_RNA, 
+                      Idents(experiment.aggregate),quantile,probs=seq(0,1,0.05))),
+      caption = "5% Quantiles of Genes/Cell by Sample") %>% kable_styling()
+```
+
+Show 5% quantiles for number of UMI per cell per sample
+```{r quantiles_2, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+kable(do.call("cbind", tapply(experiment.aggregate$nCount_RNA, 
+                                      Idents(experiment.aggregate),quantile,probs=seq(0,1,0.05))),
+      caption = "5% Quantiles of UMI/Cell by Sample") %>% kable_styling()
+```
+
+```{r genotyping}
+# use apply() functions for factors (go by row to find pattern)
+library(dplyr, quietly = TRUE)
+library(tibble)
+
+genofun1 <- function(x)
+{
+  Genotype <- c("1-2"="Heterozygote", "3a"="Heterozygote", "4b"="Heterozygote","3-1"="Homozygote","4-2"="Homozygote","276-6-2"="Homozygote","276-6-7"="Homozygote","1b"="Wild Type","2a"="Wild Type","1a-m"="Wild Type","2b-t"="Wild Type")
+  return(as.character(Genotype[x]))
+}
+experiment.aggregate$genotype <- sapply(experiment.aggregate$orig.ident,genofun1)
+str(experiment.aggregate$genotype)
+head(experiment.aggregate)
+
+```
+
+
+
+
+Violin plot of 1) number of genes, 2) number of UMI.
+```{r violins, echo=TRUE, error=FALSE, fig.height=12, message=FALSE, warning=FALSE}
+VlnPlot(
+  experiment.aggregate,
+  features = c("nFeature_RNA", "nCount_RNA"),#group.by = experiment.aggregate$genotype,
+  ncol = 1, pt.size = 0.3)
+```
+
+Ridge plots of the same data
+```{r ridgeplot_pre, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+RidgePlot(experiment.aggregate, features=c("nFeature_RNA","nCount_RNA"), ncol = 2) 
+```
+
+Plot the distribution of number of cells each gene is represented by.
+```{r gene_range, warning=FALSE,error=FALSE,message=FALSE}
+plot(sort(Matrix::rowSums(GetAssayData(experiment.aggregate) >= 3), decreasing = TRUE) , xlab="gene rank", ylab="number of cells", main="Cells per genes (reads/gene >= 3 )")
+```   
+
+
+Gene Plot, scatter plot of gene expression across cells, (colored by sample), drawing horizontal an verticale lines at proposed filtering cutoffs.
+```{r relationships, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+# Here we play around with the intercepts to find filtering parameters which will capture the bulk of your good data 
+FeatureScatter(experiment.aggregate, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", pt.size = 0.5, shuffle = TRUE) + geom_vline(xintercept = c(600,50000)) + geom_hline(yintercept = c(300, 7500))
+
+```
+### Cell filtering
+
+We use the information above to filter out cells. Here we choose those that have unique UMI counts under 1,000 or greater than 12,000 and contain at least 700 features within them.
+
+```{r echo=TRUE, error=FALSE, message=FALSE, cell_filtering, warning=FALSE}
+table(experiment.aggregate2$orig.ident)
+experiment.aggregate <- subset(experiment.aggregate, nCount_RNA >= 600 & nCount_RNA <= 50000)
+experiment.aggregate <- subset(experiment.aggregate, nFeature_RNA >= 300 & nFeature_RNA < 7500)
+experiment.aggregate
+table(experiment.aggregate$orig.ident) # shows you # of cells that got through the filtering step. You can play with this. 
+
+# you would want to check for bactch effects from this data but doesnt look like there are batch effects here 
+```
+
+Now look at the ridge plots after filtering.
+
+```{r ridgeplot_post, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+RidgePlot(experiment.aggregate, features=c("nFeature_RNA","nCount_RNA"), ncol = 2)
+
+```
+
+
+### You may also want to filter out additional genes.
+
+When creating the base Seurat object we did filter out some genes, recall _Keep all genes expressed in >= 10 cells_. After filtering cells and you may want to be more aggressive with the gene filter. Seurat doesn't supply such a function (that I can find), so below is a function that can do so, it filters genes requiring a min.value (log-normalized) in at least min.cells, here expression of 1 in at least 400 cells.
+-- skipping this for now.... ask mooney!
+MOONEY: THis could filter out small clusters of cells. Worth seeing if these clusters vary by genotype. 
+```{r gene_filter_fun, echo=TRUE}
+experiment.aggregate
+FilterGenes <-
+ function (object, min.value=1, min.cells = 400, genes = NULL) {
+   genes.use <- rownames(object)
+   if (!is.null(genes)) {
+     genes.use <- intersect(genes.use, genes)
+     object@data <- GetAssayData(object)[genes.use, ]
+   } else if (min.cells > 0) {
+     num.cells <- Matrix::rowSums(GetAssayData(object) > min.value)
+     genes.use <- names(num.cells[which(num.cells >= min.cells)])
+     object = object[genes.use, ]
+   }
+  object <- LogSeuratCommand(object = object)
+  return(object)
+}
+
+experiment.aggregate.genes <- FilterGenes(object = experiment.aggregate, min.value = 1, min.cells = 400)
+experiment.aggregate.genes
+rm(experiment.aggregate.genes)
+```
+
+
+## Next we want to normalize the data
+
+After filtering out cells from the dataset, the next step is to normalize the data. By default, we employ a global-scaling normalization method LogNormalize that normalizes the gene expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and then log-transforms the data.
+-- normalizing gene count on the cell level.... to compensate for differences in sequencing depth between different cells / samples
+
+```{r normalize, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+experiment.aggregate <- NormalizeData(
+  object = experiment.aggregate,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000)
+system("say Just finished!")
+```
+
+## Calculate Cell-Cycle with Seurat, the list of genes comes with Seurat (only for human) -- then we will convert the human genes to mouse genes
+
+-- skipping this for now because the conversion to mouse genes in 2nd code chunk not working
+```{r eval=FALSE, error=FALSE, message=FALSE, cell_cycle_human, warning=FALSE, include=FALSE}
+# this code is for human samples only!
+s.genes <- (cc.genes$s.genes)
+g2m.genes <- (cc.genes$g2m.genes)
+
+experiment.aggregate <- CellCycleScoring(experiment.aggregate,
+                                         s.features = s.genes,
+                                         g2m.features = g2m.genes,
+                                         set.ident = TRUE)
+table(experiment.aggregate@meta.data$Phase) %>%
+  kable(caption = "Number of Cells in each Cell Cycle Stage", col.names = c("Stage", "Count"), align = "c") %>%
+  kable_styling()
+```
+##Conversion from human genes to mouse genes
+```{r eval=FALSE, cell_cycle_mouse, eval=FALSE, include=FALSE}
+convertHumanGeneList <- function(x){
+  require("biomaRt")
+  human = useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl", mirror = "uswest")
+  mouse = useEnsembl("ensembl", dataset = "mmusculus_gene_ensembl", mirror = "uswest")
+
+  genes = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = x , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+
+  humanx <- unique(genes[, 2])
+
+  # Print the first 6 genes found to the screen
+  print(head(humanx))
+  return(humanx)
+}
+
+m.s.genes <- convertHumanGeneList(cc.genes.updated.2019$s.genes)
+m.g2m.genes <- convertHumanGeneList(cc.genes.updated.2019$g2m.genes)
+
+# Create our Seurat object and complete the initialization steps
+experiment.aggregate <- CellCycleScoring(experiment.aggregate, s.features = m.s.genes, g2m.features = m.g2m.genes, set.ident = TRUE)
+
+table(experiment.aggregate@meta.data$Phase) %>% kable(caption = "Number of Cells in each Cell Cycle Stage", col.names = c("Stage", "Count"), align = "c") %>% kable_styling()
+```
+
+
+#### Fixing the defualt "Ident" in Seurat
+
+```{r update_ident, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+table(Idents(experiment.aggregate))
+# changing idents if they were altered during normalization or other steps 
+Idents(experiment.aggregate) <- "orig.ident"
+table(Idents(experiment.aggregate))
+
+```
+## Identify variable genes
+
+The function FindVariableFeatures identifies the most highly variable genes (default 2000 genes) by fitting a line to the relationship of log(variance) and log(mean) using loess smoothing, uses this information to standardize the data, then calculates the variance of the standardized data.  This helps avoid selecting genes that only appear variable due to their expression level.
+
+```{r find_variable_genes, echo=TRUE, error=FALSE, message=FALSE, warning=FALSE}
+# results change if you use selection.method = "dispersion" or selection.method = "mean.var.plot" 
+experiment.aggregate <- FindVariableFeatures(
+  object = experiment.aggregate,
+  selection.method = "vst")
+
+length(VariableFeatures(experiment.aggregate))
+
+top15 <- head(VariableFeatures(experiment.aggregate), 15)
+top15
+vfp1 <- VariableFeaturePlot(experiment.aggregate)
+vfp1 <- LabelPoints(plot = vfp1, points = top15, repel = TRUE)
+vfp1
+
+```
+
+
+
+FindVariableFeatures isn't the only way to set the "variable features" of a Seurat object. Another reasonable approach is to select a set of "minimally expressed" genes. Then you can remove the minimally expressed genes from the data set. Should we do this? 
+
+```{r echo=TRUE, error=FALSE, message=FALSE, minimally_expressed_genes, warning=FALSE}
+dim(experiment.aggregate)
+min.value = 2
+min.cells = 10
+num.cells <- Matrix::rowSums(GetAssayData(experiment.aggregate, slot = "count") > min.value)
+genes.use <- names(num.cells[which(num.cells >= min.cells)])
+length(genes.use)
+VariableFeatures(experiment.aggregate) <- genes.use
+
+system("say Done")
+```
+Save the filtered and normalized data
+```{r save_r, include=FALSE}
+save(experiment.aggregate, file="pre_sample_corrected.RData")
+
+system("say Done")
+```
+

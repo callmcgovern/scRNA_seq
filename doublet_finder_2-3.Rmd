@@ -1,0 +1,293 @@
+---
+title: "NGLY1 scRNA seq - doublet finder"
+author: "CAM"
+output:
+    html_document:
+      keep_md: TRUE
+---
+
+Last Updated: July 15, 2022]
+
+CAM NOTE FROM MEETING WITH MOONEY ON 9/3
+GO THROUGH GITHUB DOUBLET FINDER PAGE AND MAKE DF CLUSTER DIAGRAMS.
+FIND WHAT POPULATION AND WHAT GENOTYPE HAS DOUBLETS.... 
+
+
+# Part 7: Add Doublet Detection
+
+Doublets are cells that appear to be, but are not, real cells. There are two major types of doublets: heterotypic and homotypic. Heterotypic doublets are formed by cells with distinct transcriptional profiles. Homotypic doublets are formed by cells with similar transcriptional profiles. Heterotypic doublets are relatively easier to detect compared with homotypic doublets. Depending on the protocols used to barcode single cells/nuclei, doublet rates vary significantly and it can reach as high as 40%.
+
+## Doublet detection with DoubletFinder
+
+[DoubletFinder](https://github.com/chris-mcginnis-ucsf/DoubletFinder) takes fully pre-processed data from Seurat (NormalizeData, FindVariableGenes, ScaleData, RunPCA and RunTSNE) as input and the process should be done for each sample individually. The input data should be processed to remove low-quality cell clusters first.
+
+We are going to run DoubletFinder on sample _A001-C-007_.
+
+We start each markdown document with installing/loading needed libraries for R:
+
+```{r, warning=FALSE,error=FALSE,message=FALSE}
+# must install DoubletFinder
+if (!any(rownames(installed.packages()) == "DoubletFinder")){
+  remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+}
+
+library(DoubletFinder)
+
+# must have Seurat
+library(Seurat)
+library(kableExtra)
+library(ggplot2)
+library(parallel) # detectCores()
+library(DoubletFinder) # paramSweep_v3()
+```
+
+```{r wd}
+experiment_name = "NGLY1"
+dataset_loc <- "./"
+ids <- c("1-2", "1a-m", "1b", "2a", "2b-t", "3-1", "3a", "4-2", "4b", "276-6-2","276-6-7") #make sure an outs folder exists within each sample folder
+```
+
+```{r load, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+d10x.data <- lapply(ids, function(i){   
+  d10x <- Read10X_h5(file.path(dataset_loc, i, "filtered_feature_bc_matrix.h5")) 
+  colnames(d10x) <- paste(sapply(strsplit(colnames(d10x),split="-"),'[[',1L),i,sep="_")
+  d10x
+})
+names(d10x.data) <- ids
+str(d10x.data)         
+```
+
+```{r filter}
+experiment.data <- do.call("cbind", d10x.data) # do.call("cbind") takes list and sticks them into 1 object so... Here we stick the samples together by column! 
+
+experiment.aggregate <- CreateSeuratObject(
+  experiment.data,
+  project = experiment_name,
+  min.cells = 10, #filter genes based on how many cells express the genes. Gene must be expressed by at least 10 cells. 
+  min.features = 300, #what is the min feature # associated with a cell before i cut it out of the dataset. 
+  names.field = 2, #
+  names.delim = "\\_") # divides sample name at _ and name the sample based on 2nd field of the barcode 
+
+# check out colnames with head(colnames(experiment.aggregate))
+experiment.aggregate
+str(experiment.aggregate)
+```
+
+
+# From walk through on https://rpubs.com/kenneditodd/doublet_finder_example
+
+```{split}
+#table(experiment.aggregate$orig.ident) # to explore split by sample 
+
+sample_split <- SplitObject(experiment.aggregate, split.by = "orig.ident") # to run split by sample
+```
+
+
+```{r LOOPING DF}
+
+# loop through samples to find doublets
+for (i in 1:length(sample_split)) {
+  # print the sample we are on
+  print(paste0("orig.ident ",i))
+
+  
+# Pre-process seurat object with standard seurat workflow
+split.sample <- NormalizeData(sample_split[[i]])
+split.sample <- FindVariableFeatures(split.sample)
+split.sample <- ScaleData(split.sample)
+split.sample <- RunPCA(split.sample, nfeatures.print = 10)
+
+# Find significant PCs
+stdv <- split.sample[["pca"]]@stdev
+sum.stdv <- sum(split.sample[["pca"]]@stdev)
+percent.stdv <- (stdv / sum.stdv) * 100
+cumulative <- cumsum(percent.stdv)
+co1 <- which(cumulative > 90 & percent.stdv < 5)[1]
+co2 <- sort(which((percent.stdv[1:length(percent.stdv) - 1] - 
+                     percent.stdv[2:length(percent.stdv)]) > 0.1), 
+            decreasing = T)[1] + 1
+min.pc <- min(co1, co2)
+min.pc
+
+# finish pre-processing
+split.sample <- RunUMAP(split.sample, dims = 1:min.pc)
+split.sample <- FindNeighbors(object = split.sample, dims = 1:min.pc)              
+split.sample <- FindClusters(object = split.sample, resolution = 0.1)
+
+# pK identification (no ground-truth)
+sweep.list <- paramSweep_v3(split.sample, PCs = 1:min.pc, num.cores = detectCores() - 1)
+sweep.stats <- summarizeSweep(sweep.list)
+bcmvn <- find.pK(sweep.stats)
+
+# Optimal pK is the max of the bomodality coefficent (BCmvn) distribution
+bcmvn.max <- bcmvn[which.max(bcmvn$BCmetric),]
+optimal.pk <- bcmvn.max$pK
+optimal.pk <- as.numeric(levels(optimal.pk))[optimal.pk]
+
+## Homotypic doublet proportion estimate
+annotations <- split.sample@meta.data$seurat_clusters
+homotypic.prop <- modelHomotypic(annotations) 
+nExp.poi <- round(optimal.pk * nrow(split.sample@meta.data)) ## Assuming 7.5% doublet formation rate - tailor for your dataset
+nExp.poi.adj <- round(nExp.poi * (1 - homotypic.prop))
+
+# run DoubletFinder
+split.sample <- doubletFinder_v3(seu = split.sample, 
+                                 PCs = 1:min.pc, 
+                                 pK = optimal.pk,
+                                 nExp = nExp.poi.adj)
+metadata <- split.sample@meta.data
+colnames(metadata)[7] <- "doublet_finder"
+split.sample@meta.data <- metadata 
+
+# subset and save
+singlets <- subset(split.sample, doublet_finder == "Singlet")
+sample_split[[i]] <- singlets
+remove(singlets)
+}
+
+
+```
+
+```{r converge}
+singlets <- merge(x = sample_split[[1]],
+                       y = c(sample_split[[2]], sample_split[[3]], sample_split[[4]],
+                             sample_split[[5]], sample_split[[6]], sample_split[[7]],
+                             sample_split[[8]], sample_split[[9]], sample_split[[10]], sample_split[[11]]),
+                       project = "ngly1")
+
+singlets
+experiment.aggregate
+
+save(singlets,file="singlets_seurat_object.RData")
+
+```
+
+
+# Need to figure out how to plot to see where doublets were found
+```{r play}
+singlets2 <- NormalizeData(singlets)
+singlets2 <- FindVariableFeatures(singlets2, selection.method = "vst", nfeatures = 2000)
+singlets2 <- ScaleData(singlets2)
+singlets2 <- RunPCA(singlets2)
+singlets2 <- FindNeighbors(singlets2, reduction="pca", dims = 1:50)
+singlets2 <- FindClusters(
+    object = singlets2,
+    resolution = seq(0.25,1,0.5),
+    verbose = FALSE
+)
+singlets2 <- RunUMAP(singlets2, dims=1:50)
+```
+
+
+
+
+
+``` {r done}
+system("say done")
+
+```
+
+
+
+
+
+# FROM THE UCDAVIS COURSE 
+
+
+```{r ridgeplot_pre, warning=FALSE,error=FALSE,message=FALSE}
+RidgePlot(experiment.data, features=c("nFeature_RNA","nCount_RNA"), log=T, ncol = 2)
+```
+
+### Cell filtering
+
+We use the information above to filter out cells. Here we choose those that have percent mitochondrial genes max of 8%, unique UMI counts under 1,000 or greater than 12,000 and contain at least 400 features within them.
+
+```{r, cell_filtering, warning=FALSE,error=FALSE,message=FALSE}
+table(experiment.data$orig.ident)
+
+experiment.data <- subset(experiment.data, nFeature_RNA >= 400 & nFeature_RNA <= 4000)
+
+experiment.data_1_2 <- subset(experiment.data, nCount_RNA >= 500 & nCount_RNA <= 12000)
+
+experiment.data_1_2
+
+table(experiment.data_1_2$orig.ident)
+```
+
+
+Lets see the ridge plots after filtering
+```{r ridgeplot_post, warning=FALSE,error=FALSE,message=FALSE}
+RidgePlot(experiment.data_1_2, features=c("nFeature_RNA","nCount_RNA", "percent.mito"), log=T, ncol = 2)
+```
+
+
+```{r preprocess, warning=FALSE,error=FALSE,message=FALSE}
+experiment.aggregate_1_2 <- NormalizeData(experiment.aggregate_1_2)
+experiment.aggregate_1_2 <- FindVariableFeatures(experiment.aggregate_1_2, selection.method = "vst", nfeatures = 2000)
+experiment.aggregate_1_2 <- ScaleData(experiment.aggregate_1_2)
+experiment.aggregate_1_2 <- RunPCA(experiment.aggregate_1_2)
+experiment.aggregate_1_2 <- FindNeighbors(experiment.aggregate_1_2, reduction="pca", dims = 1:50)
+experiment.aggregate_1_2 <- FindClusters(
+    object = experiment.aggregate_1_2,
+    resolution = seq(0.25,1,0.5),
+    verbose = FALSE
+)
+experiment.aggregate_1_2 <- RunUMAP(experiment.aggregate_1_2, dims=1:50)
+DimPlot(object = experiment.aggregate_1_2, pt.size=0.5, reduction = "umap", label = T)
+
+```
+
+```{r doubletfinder, warning=FALSE,error=FALSE,message=FALSE}
+sweep.res <- paramSweep_v3(experiment.aggregate_1_2, PCs = 1:20, sct = FALSE) # important to find parameters for the data set. 
+sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+pK.set <- unique(sweep.stats$pK)[2] # gives you info for which parameters you should pick. Use the max point of the plot as your parameter. 
+pk.set <- 0.02
+
+##MOONEY - not sure how to read this max point? 
+```
+
+```{r doubletfinder-param, warning=FALSE,error=FALSE,message=FALSE}
+nExp_poi <- round(0.08*nrow(experiment.aggregate_1_2@meta.data))
+```
+
+```{r doubletfinder-final, warning=FALSE,error=FALSE,message=FALSE}
+experiment.aggregate_1_2 <- doubletFinder_v3(experiment.aggregate_1_2, PCs = 1:50, pN = 0.25, pK = as.numeric(as.character(pK.set)), nExp = nExp_poi, reuse.pANN = FALSE, sct = FALSE)
+```
+
+## The following code can be used if literature assisted cell type identification is available
+--- Mooney??
+```{r doubletfinder-param-ct, eval=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+annotations <- experiment.aggregate_1_2@meta.data$seurat_clusters
+homotypic.prop <- modelHomotypic(annotations)
+nExp_poi <- round(0.08*nrow(experiment.aggregate_1_2@meta.data))
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+experiment.aggregate_1_2 <- doubletFinder_v3(experiment.aggregate_1_2, PCs = 1:20, pN = 0.25, pK = as.numeric(as.character(pK.set)), nExp = nExp_poi.adj, reuse.pANN = "pANN_0.25_0.02_142", sct = FALSE)
+
+#if you want to visualize the
+colors <- ifelse(experiment.aggregate_1_2@meta.data$DF.classifications_0.25_0.02_142 == "Singlet" , "blue", "red")
+DimPlot(object = experiment.aggregate_1_2, pt.size=0.5, reduction = "umap", label = T, cols = colors)
+```
+
+## Remove doublets
+
+```{r doubletfinder-remove, eval=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+colnames(experiment.aggregate_1_2@meta.data)
+#notice the added columns - pANN and DF classifications. 
+head(experiment.aggregate_1_2@meta.data$DF.classifications_0.25_0.01_614) #these are the columns that are used to remove the doublets 
+
+experiment.aggregate_1_2 <- subset(experiment.aggregate_1_2,  DF.classifications_0.25_0.01_614 == "Singlet") 
+# remember this is just a single sample
+## after filtering you can combine everything back again to do downstream analyses 
+### recommended that you redo normalization, PCA, and anything else again after removing doublets 
+```
+
+```{r save singlets}
+save(experiment.aggregate_1_2, file = "./1-2/1-2_singlets.RData")
+```
+
+## Session Information
+```{r sessioinfo}
+sessionInfo()
+```

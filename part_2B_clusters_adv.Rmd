@@ -1,0 +1,99 @@
+---
+title: "part2.5 - merging and reassigning cluster, removing cells"
+output: html_document
+date: "2022-08-08"
+---
+
+
+Go through these next 3 sections and discuss with Mooney if things should be merged or reordered. 
+### Merging clusters
+
+Merge Clustering results, so lets say clusters 0 and 1 are actually the same cell type and we don't wish to separate them out as distinct clusters. (choose clusters that may need to be merged with Mooney) -- 11, 4, and 6 all seem suspicious to me!!
+
+```{r merging_cluster, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+experiment.merged = experiment.aggregate2
+Idents(experiment.merged) <- "RNA_snn_res.0.25"
+
+experiment.merged <- RenameIdents(
+  object = experiment.merged,
+  'x' = 'x',
+  'x' = 'x'
+)
+
+table(Idents(experiment.merged))
+DimPlot(object = experiment.merged, 
+        pt.size=0.5, 
+        label = T, 
+        reduction = "umap")
+
+```
+
+### Reordering the clusters
+
+In order to reorder the clusters for plotting purposes take a look at the levels of the Ident, which indicates the ordering, then relevel as desired.
+
+```{r merging_cluster2, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+experiment.examples <- experiment.merged
+levels(experiment.examples@active.ident)
+
+experiment.examples@active.ident <- relevel(experiment.examples@active.ident, "12")
+levels(experiment.examples@active.ident)
+# now cluster 12 is the "first" factor
+
+DimPlot(object = experiment.examples, pt.size=0.5, label = T, reduction = "umap")
+VlnPlot(object = experiment.examples, features = "percent.mito", pt.size = 0.05)
+```
+
+```{r merging_cluster3, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# relevel all the factors to the order I want
+neworder <- sample(levels(experiment.examples), replace=FALSE)
+Idents(experiment.examples) <- factor(experiment.examples@active.ident, levels=neworder)
+levels(experiment.examples@active.ident)
+
+DimPlot(object = experiment.examples, pt.size=0.5, label = T, reduction = "umap")
+VlnPlot(object = experiment.examples, features = "percent.mito", pt.size = 0.05)
+```
+
+### Re-assign clustering result (subclustering only cluster 0) to clustering for resolution 3.75  (@ reslution 0.25) [adding a R prefix]
+```{r subclusters, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+ newIdent = as.character(Idents(experiment.examples)) # converts from factor to char vector
+ newIdent[newIdent == '0'] = paste0("R",as.character(experiment.examples$RNA_snn_res.3.75[newIdent == '0'])) # every index where cluster ID = 0, we will add R and break the cluster up by clustering with a higher resolution. This allows you to pull groups that are clustering together if you are interested in them. Or you can leave tihngs in super clusters if they are not important to your analysis.
+
+ Idents(experiment.examples) <- as.factor(newIdent)
+ table(Idents(experiment.examples))
+```
+
+```{r subclusters_plot, warning=FALSE,error=FALSE,message=FALSE}
+ DimPlot(object = experiment.examples, pt.size=0.5, label = T, reduction = "umap")
+```
+
+Plot UMAP  coloring by the slot 'orig.ident' (sample names) with alpha colors turned on. A pretty picture 
+```{r pretty_pre, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE} 
+DimPlot(object = experiment.aggregate2, 
+       group.by="orig.ident", 
+       pt.size=0.5,  
+       reduction = "umap", 
+       shuffle = TRUE) 
+``` 
+
+```{r pretty_post, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE} 
+## Pretty umap using alpha -- this allows you to see things better in umaps 
+alpha.use <- 2/5 
+p <- DimPlot(object = experiment.aggregate2,  
+            group.by="orig.ident",  
+            pt.size=0.5,  
+            reduction = "umap", 
+            shuffle = TRUE) 
+p$layers[[1]]$mapping$alpha <- alpha.use 
+p + scale_alpha_continuous(range = alpha.use, guide = F) 
+``` 
+Removing cells assigned to specific clusters from a plot -- might be a contaminant cluster or something youre not interested in  
+```{r removing_cells, eval=FALSE, error=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# create a new tmp object with those removed 
+experiment.aggregate.tmp <- experiment.aggregate2[,-which(Idents(experiment.aggregate2) %in% c("X"))] 
+dim(experiment.aggregate2) 
+dim(experiment.aggregate.tmp) 
+DimPlot(object = experiment.aggregate.tmp, pt.size=0.5, reduction = "umap", label = T) 
+``` 
+

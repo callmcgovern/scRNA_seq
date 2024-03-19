@@ -1,0 +1,188 @@
+---
+title: "scRNA NGLY1 enrichent and cell ID"
+author: "CAM"
+output:
+    html_document:
+      keep_md: TRUE
+---
+
+# Part 6: Enrichment, Model-Based DE, and Cell-Type Identification
+
+```{r setup_opt, warning=FALSE,error=FALSE,message=FALSE, echo = F}
+options(width = 450)
+```
+
+## Load libraries
+```{r load_library, warning=FALSE,error=FALSE,message=FALSE}
+library(Seurat)
+library(ggplot2)
+library(limma)
+library(topGO)
+```
+
+## Load the Seurat object
+```{r load_rdata, warning=FALSE,error=FALSE,message=FALSE}
+load("clusters_seurat_object.RData")
+experiment.merged
+Idents(experiment.merged) <- "finalcluster" 
+
+#using non integrated object here 
+```
+
+# 1. Gene Ontology (GO) Enrichment of Genes Expressed in a Cluster
+[Gene Ontology](http://geneontology.org/docs/ontology-documentation/) provides a controlled vocabulary for describing gene products.  Here we use enrichment analysis to identify GO terms that are overrepresented among the gene expressed in cells in a given cluster. 
+
+CAM: 
+Gene ontology = Library that allows you to figure out what genes do. (gene anotation)
+* 3 components of Gene Ontology
+
+
+```{r GO, warning=FALSE,error=FALSE,message=FALSE}
+# Looking at genes that are expressed in a cluster. Typically you would do this to all clusters. Look at chunk below to see how you would do it to all clusters.
+
+cluster12 <- subset(experiment.merged, idents = '12')
+expr <- as.matrix(GetAssayData(cluster12))
+# Filter out genes that are 0 for every cell in this cluster
+bad <- which(rowSums(expr) == 0)
+expr <- expr[-bad,]
+
+# Select genes that are expressed > 0 in at least half of cells -- CAM: this is an arbitrary cut off. 
+n.gt.0 <- apply(expr, 1, function(x)length(which(x > 0)))
+expressed.genes <- rownames(expr)[which(n.gt.0/ncol(expr) >= 0.5)]
+all.genes <- rownames(expr) # outputs list of genes
+
+# define geneList as 1 if gene is in expressed.genes, 0 otherwise
+geneList <- ifelse(all.genes %in% expressed.genes, 1, 0)
+names(geneList) <- all.genes
+
+# Create topGOdata object
+	GOdata <- new("topGOdata", 
+		ontology = "BP", # use biological process ontology -- you could also use molecular ontology (MO) instead. 
+		allGenes = geneList,
+		geneSelectionFun = function(x)(x == 1),
+              annot = annFUN.org, mapping = "org.Hs.eg.db", ID = "symbol") # "mapping = "X"" is where you put a database in. This data base "org.Hs.eg.db" is for human genes, for mouse genes you need to switch to a diff database
+	
+# Test for enrichment using Fisher's Exact Test
+	# Test for genes in the cluster that are expressed more than what could be by chance 
+	  # go on UC Davis bootcamp site to see what these columns 
+	
+	resultFisher <- runTest(GOdata, algorithm = "elim", statistic = "fisher")
+	GenTable(GOdata, Fisher = resultFisher, topNodes = 20, numChar = 60)
+```
+
+
+```{r GO_forAllClusters}
+# use sapply - a function to repeatedly do an action over a set
+## simplified version of what ill need to do 
+### Input gene ontology code from above chunk instead of the last subset.data call 
+sapply(1:2, function(cluster){
+  subset.data <- subset(experiment.aggregate, idents = cluster)
+  subset.data
+}) 
+
+```
+
+
+* Annotated: number of genes (out of all.genes) that are annotated with that GO term
+* Significant: number of genes that are annotated with that GO term and meet our criteria for "expressed"
+* Expected: Under random chance, number of genes that would be expected to be annotated with that GO term and meeting our criteria for "expressed"
+* Fisher: (Raw) p-value from Fisher's Exact Test
+
+# 2. Model-based DE analysis in limma 
+[limma](https://bioconductor.org/packages/release/bioc/html/limma.html) is an R package for differential expression analysis of bulk RNASeq and microarray data.  We apply it here to single cell data.
+
+Limma can be used to fit any linear model to expression data and is useful for analyses that go beyond two-group comparisons.  A detailed tutorial of model specification in limma is available [here](https://ucdavis-bioinformatics-training.github.io/2021-June-RNA-Seq-Analysis/data_analysis/DE_Analysis_mm_with_quizzes) and in the [limma User's Guide](https://www.bioconductor.org/packages/devel/bioc/vignettes/limma/inst/doc/usersguide.pdf).
+
+```{r}
+# Using limma package to do differential expression - model specification for limma can be challenging. 
+## setting linear model to each gene to compare gene expression in samples.... 
+### within a given cluster, you compare gene expression in 2+ sample types (ex. comparing gene expression in T cells in cancer vs normal)
+
+# step1 - filter genes to those expressed in at least 10% of cells -- can lower this % but it should be >0%
+keep <- rownames(expr)[which(n.gt.0/ncol(expr) >= 0.1)]
+expr2 <- expr[keep,]
+
+# Set up "design matrix" with statistical model
+cluster12$proper.ident <- make.names(cluster12$orig.ident)
+mm <- model.matrix(~0 + proper.ident + S.Score + G2M.Score + percent.mito + nFeature_RNA, data = cluster12[[]]) # adjusting by certain parameters here 
+## if you had multiple samples of each type, youd need to add in ....??? (go to day3 video around 3pm)
+### need to add treatment groups into model.matrix function!! ( + variable )
+head(mm)
+tail(mm)
+
+# Fit model in limma
+fit <- lmFit(expr2, mm)
+head(coef(fit))
+
+# Test 'B001-A-301' - 'A001-C-007'
+contr <- makeContrasts(proper.identB001.A.301 - proper.identA001.C.007, levels = colnames(coef(fit))) # compares multiple samples
+contr
+fit2 <- contrasts.fit(fit, contrasts = contr) # improves estimates of errors
+fit2 <- eBayes(fit2)
+out <- topTable(fit2, n = Inf, sort.by = "P") # displays results and adjusts based on p values -- 
+head(out, 30)
+```
+
+### Output columns:
+* logFC: log fold change (since we are working with Seurat's natural log transformed data, will be natural log fold change)
+* AveExpr: Average expression across all cells in expr2
+* t: logFC divided by its standard error
+* P.Value: Raw p-value (based on t) from test that logFC differs from 0
+* adj.P.Val: Benjamini-Hochberg false discovery rate adjusted p-value
+* B: log-odds that gene is DE 
+
+
+```{r questions}
+# How many genes have an adjusted p val < 0.05? 
+length(which(out$adj.P.Val < 0.05 & out$logFC < 0))
+
+# how many genes are significanly (adjusted p val < 0.05) downregulated from one sampple to another?? 
+## --> you are subtracting B from A in the makeContrasts() function so if its negative it means its downregulated 
+new.out <- subset(out, adj.P.Val < 0.05 & logFC < 0)
+new.out
+
+```
+
+
+
+
+
+
+# BONUS: Cell type identification with scMRMA
+[scMRMA]([https://academic.oup.com/nar/article/50/2/e7/6396893]) (single cell Multi-Resolution Marker-based Annotation Algorithm) classifies cells by iteratively clustering them then annotating based on a hierarchical external database.
+
+The databases included with the current version are only for use with human and mouse, but a user-constructed hierarchichal database can be used. 
+
+The package can be installed from [Github](https://github.com/JiaLiVUMC/scMRMA):
+
+```{r}
+# !!! --- if we are interested in using this then they will work with us offline to make it work!! (very challenging and new but reach out to them if desired)
+## this is a way to look at cell types in the clusters. gives you nice table with cell type in rows and clusters in columns. you can use these results to eval existing clustering 
+install.packages("devtools")
+devtools::install_github("JiaLiVUMC/scMRMA")
+```
+
+```{r, warning = FALSE}
+suppressPackageStartupMessages(library(scMRMA))
+result <- scMRMA(input = experiment.merged,
+                 species = "Hs",
+                 db = "panglaodb") # this is the database which MIGHT need to change for the mouse data
+table(result$uniformR$annotationResult)
+
+## Add cell types to metadata
+experiment.merged <- AddMetaData(experiment.merged, result$uniformR$annotationResult, col.name = "CellType")
+table(experiment.merged$CellType, experiment.merged$orig.ident)
+table(experiment.merged$CellType, experiment.merged$finalcluster)
+DimPlot(experiment.merged, group.by = "CellType", label = TRUE)
+```
+
+## Get the next Rmd file
+```{r getnextfile, eval=FALSE}
+download.file("https://raw.githubusercontent.com/ucdavis-bioinformatics-training/2022-July-Single-Cell-RNA-Seq-Analysis/main/data_analysis/scRNA_Workshop-PART7.Rmd", "scRNA_Workshop-PART7.Rmd")
+```
+
+                 
+## Session Information
+```{r session_info, warning=FALSE,error=FALSE,message=FALSE}
+sessionInfo()
+```
